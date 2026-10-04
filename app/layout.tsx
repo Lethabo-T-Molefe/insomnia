@@ -15,8 +15,8 @@ export const metadata: Metadata = {
     "Keep free hosting services awake. Ping URLs on your schedule, per account.",
   applicationName: "Insomnia",
   icons: {
-    icon: "/chopa-sub.png",
-    apple: "/chopa-sub.png",
+    icon: "/chopa-mark.png",
+    apple: "/chopa-mark.png",
   },
 };
 

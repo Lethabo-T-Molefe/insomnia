@@ -295,8 +295,7 @@ export async function listRecentForUser(
 export async function getStatsForUser(userId: string): Promise<StatsPayload> {
   const database = await db();
 
-  // Prefer individual recent pings so the chart is readable early on.
-  // Fall back to hourly buckets once there is enough history.
+  // Single bounded query — avoids a second aggregation round-trip on cold pools.
   const recent = await database.execute({
     sql: `SELECT created_at, ok, latency_ms
           FROM ping_events
@@ -315,7 +314,9 @@ export async function getStatsForUser(userId: string): Promise<StatsPayload> {
 
   let points: StatsPayload["points"] = [];
 
-  if (recentRows.length > 0 && recentRows.length < 24) {
+  if (recentRows.length === 0) {
+    points = [];
+  } else if (recentRows.length < 24) {
     points = recentRows.map((row) => ({
       date: iso(row.created_at) ?? new Date().toISOString(),
       pings: 1,
@@ -323,37 +324,43 @@ export async function getStatsForUser(userId: string): Promise<StatsPayload> {
       failures: row.ok ? 0 : 1,
       latency: Math.round(Number(row.latency_ms ?? 0)),
     }));
-  } else if (recentRows.length >= 24) {
-    const result = await database.execute({
-      sql: `SELECT
-              date_trunc('hour', created_at) AS bucket,
-              COUNT(*)::int AS pings,
-              COUNT(*) FILTER (WHERE ok)::int AS successes,
-              COUNT(*) FILTER (WHERE NOT ok)::int AS failures,
-              COALESCE(AVG(latency_ms) FILTER (WHERE latency_ms IS NOT NULL), 0)::float AS latency
-            FROM ping_events
-            WHERE user_id = ?
-              AND created_at >= NOW() - INTERVAL '24 hours'
-            GROUP BY 1
-            ORDER BY 1 ASC`,
-      args: [userId],
-    });
-
-    points = (
-      result.rows as Array<{
-        bucket: Date | string;
-        pings: number;
-        successes: number;
-        failures: number;
-        latency: number;
-      }>
-    ).map((row) => ({
-      date: iso(row.bucket) ?? new Date().toISOString(),
-      pings: Number(row.pings),
-      successes: Number(row.successes),
-      failures: Number(row.failures),
-      latency: Math.round(Number(row.latency)),
-    }));
+  } else {
+    const buckets = new Map<
+      string,
+      { pings: number; successes: number; failures: number; latencySum: number; latencyCount: number }
+    >();
+    for (const row of recentRows) {
+      const at = new Date(row.created_at);
+      at.setMinutes(0, 0, 0);
+      const key = at.toISOString();
+      const bucket = buckets.get(key) ?? {
+        pings: 0,
+        successes: 0,
+        failures: 0,
+        latencySum: 0,
+        latencyCount: 0,
+      };
+      bucket.pings += 1;
+      if (row.ok) bucket.successes += 1;
+      else bucket.failures += 1;
+      if (row.latency_ms != null) {
+        bucket.latencySum += Number(row.latency_ms);
+        bucket.latencyCount += 1;
+      }
+      buckets.set(key, bucket);
+    }
+    points = [...buckets.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, bucket]) => ({
+        date,
+        pings: bucket.pings,
+        successes: bucket.successes,
+        failures: bucket.failures,
+        latency:
+          bucket.latencyCount === 0
+            ? 0
+            : Math.round(bucket.latencySum / bucket.latencyCount),
+      }));
   }
 
   // Ensure the chart always has at least two x points so the area path draws.

@@ -12,7 +12,7 @@ type BrandProps = {
 const sizes = {
   sm: 40,
   md: 56,
-  lg: 80,
+  lg: 112,
   hero: 128,
 } as const;
 

@@ -16,8 +16,7 @@ export function Landing() {
         className="pointer-events-none absolute inset-0 opacity-[0.07] [background-image:linear-gradient(color-mix(in_oklab,var(--foreground)_40%,transparent)_1px,transparent_1px),linear-gradient(90deg,color-mix(in_oklab,var(--foreground)_40%,transparent)_1px,transparent_1px)] [background-size:48px_48px]"
       />
 
-      <header className="relative z-10 mx-auto flex w-full max-w-6xl items-center justify-between px-5 py-6 sm:px-8">
-        <Brand size="md" href="/" />
+      <header className="relative z-10 mx-auto flex w-full max-w-6xl items-center justify-end px-5 py-6 sm:px-8">
         <nav className="flex items-center gap-3">
           <Link
             href="/login"
