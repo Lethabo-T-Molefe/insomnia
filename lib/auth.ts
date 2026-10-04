@@ -24,6 +24,20 @@ function roleForEmail(email: string, existingRole?: string): UserRole {
   return "user";
 }
 
+function toAuthUser(row: {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+}): AuthUser {
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    role: row.role === "admin" ? "admin" : "user",
+  };
+}
+
 async function findUser(id: string): Promise<AuthUser | null> {
   const database = await db();
   const result = await database.execute({
@@ -33,12 +47,72 @@ async function findUser(id: string): Promise<AuthUser | null> {
   const row = result.rows[0] as
     | { id: string; email: string; name: string; role: string }
     | undefined;
-  if (!row) return null;
+  return row ? toAuthUser(row) : null;
+}
+
+async function findUserByEmail(email: string): Promise<AuthUser | null> {
+  const database = await db();
+  const result = await database.execute({
+    sql: "SELECT id, email, name, role FROM users WHERE lower(email) = lower(?)",
+    args: [email],
+  });
+  const row = result.rows[0] as
+    | { id: string; email: string; name: string; role: string }
+    | undefined;
+  return row ? toAuthUser(row) : null;
+}
+
+/**
+ * When the same email signs in with a new Clerk user id (e.g. test → live),
+ * rebind the existing DB account and related rows to the new id.
+ */
+async function rebindClerkUserId(input: {
+  oldId: string;
+  newId: string;
+  email: string;
+  name: string;
+  role: UserRole;
+}): Promise<AuthUser> {
+  const database = await db();
+  const tempEmail = `__migrating_${input.newId}@insomnia.local`;
+
+  await database.batch([
+    {
+      sql: "UPDATE users SET email = ? WHERE id = ?",
+      args: [tempEmail, input.oldId],
+    },
+    {
+      sql: `INSERT INTO users (id, email, name, role)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE
+            SET email = EXCLUDED.email,
+                name = EXCLUDED.name,
+                role = EXCLUDED.role`,
+      args: [input.newId, input.email, input.name, input.role],
+    },
+    {
+      sql: "UPDATE targets SET user_id = ? WHERE user_id = ?",
+      args: [input.newId, input.oldId],
+    },
+    {
+      sql: "UPDATE ping_events SET user_id = ? WHERE user_id = ?",
+      args: [input.newId, input.oldId],
+    },
+    {
+      sql: "UPDATE audit_events SET actor_id = ? WHERE actor_id = ?",
+      args: [input.newId, input.oldId],
+    },
+    {
+      sql: "DELETE FROM users WHERE id = ?",
+      args: [input.oldId],
+    },
+  ]);
+
   return {
-    id: row.id,
-    email: row.email,
-    name: row.name,
-    role: row.role === "admin" ? "admin" : "user",
+    id: input.newId,
+    email: input.email,
+    name: input.name,
+    role: input.role,
   };
 }
 
@@ -48,13 +122,32 @@ async function upsertClerkUser(input: {
   name: string;
 }): Promise<AuthUser> {
   const database = await db();
-  const existing = await database.execute({
-    sql: "SELECT role FROM users WHERE id = ?",
-    args: [input.id],
-  });
-  const existingRole = (existing.rows[0] as { role?: string } | undefined)?.role;
-  const role = roleForEmail(input.email, existingRole);
 
+  const byId = await findUser(input.id);
+  if (byId) {
+    const role = roleForEmail(input.email, byId.role);
+    await database.execute({
+      sql: `UPDATE users
+            SET email = ?, name = ?, role = ?
+            WHERE id = ?`,
+      args: [input.email, input.name, role, input.id],
+    });
+    return { ...input, role };
+  }
+
+  const byEmail = await findUserByEmail(input.email);
+  if (byEmail && byEmail.id !== input.id) {
+    const role = roleForEmail(input.email, byEmail.role);
+    return rebindClerkUserId({
+      oldId: byEmail.id,
+      newId: input.id,
+      email: input.email,
+      name: input.name,
+      role,
+    });
+  }
+
+  const role = roleForEmail(input.email, byEmail?.role);
   await database.execute({
     sql: `INSERT INTO users (id, email, name, role)
           VALUES (?, ?, ?, ?)
@@ -77,7 +170,6 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
 
   const existing = await findUser(userId);
   if (existing) {
-    // Keep admin list in sync without calling Clerk on every request.
     const desired = roleForEmail(existing.email, existing.role);
     if (desired === "admin" && existing.role !== "admin") {
       const database = await db();
