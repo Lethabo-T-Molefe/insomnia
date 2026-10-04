@@ -133,7 +133,7 @@ async function open(): Promise<Database> {
     connect_timeout: 8,
     connection: {
       search_path: `${SCHEMA_NAME},public`,
-      statement_timeout: "10000",
+      statement_timeout: 10000,
     },
     onnotice: () => {},
   });
