@@ -96,18 +96,26 @@ function needsSsl(url: string) {
   }
 }
 
+const runtime = globalThis as {
+  insomniaPg?: Promise<Database>;
+  insomniaSchemaReady?: boolean;
+};
+
 async function ensureSchema(sql: ReturnType<typeof postgres>) {
-  // Fast path: skip DDL when the app schema already exists (avoids Render/Supabase timeouts).
+  if (runtime.insomniaSchemaReady) return;
+
   const existing = await sql.unsafe(
     `SELECT to_regclass('insomnia.users') IS NOT NULL AS ready`,
   );
   if ((existing[0] as { ready?: boolean } | undefined)?.ready) {
+    runtime.insomniaSchemaReady = true;
     return;
   }
 
   await sql.begin(async (tx) => {
     for (const statement of SCHEMA) await tx.unsafe(statement);
   });
+  runtime.insomniaSchemaReady = true;
 }
 
 async function open(): Promise<Database> {
@@ -116,17 +124,16 @@ async function open(): Promise<Database> {
 
   const sql = postgres(url, {
     ssl: needsSsl(url) ? "require" : false,
-    // Supabase transaction pooler (port 6543) does not support prepared statements.
+    // Supabase transaction/session poolers reject prepared statements in some modes.
     prepare: false,
-    max: 3,
+    max: 1,
     idle_timeout: 20,
-    connect_timeout: 20,
+    max_lifetime: 60 * 5,
+    connect_timeout: 10,
     connection: { search_path: `${SCHEMA_NAME},public` },
     onnotice: () => {},
   });
 
-  // Raise per-connection timeout above Supabase's tight default when allowed.
-  await sql.unsafe(`SET statement_timeout = '15s'`).catch(() => undefined);
   await ensureSchema(sql);
 
   return {
@@ -145,11 +152,9 @@ async function open(): Promise<Database> {
   };
 }
 
-const cache = globalThis as { insomniaPg?: Promise<Database> };
-
 export function db() {
-  return (cache.insomniaPg ??= open().catch((error) => {
-    cache.insomniaPg = undefined;
+  return (runtime.insomniaPg ??= open().catch((error) => {
+    runtime.insomniaPg = undefined;
     throw error;
   }));
 }

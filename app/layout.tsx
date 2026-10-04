@@ -27,6 +27,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <ClerkProvider
+      telemetry={false}
       appearance={{
         variables: {
           colorPrimary: "#e8a54b",

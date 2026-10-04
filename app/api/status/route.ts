@@ -1,10 +1,6 @@
 import { requireUser } from "@/lib/auth";
 import { getPingEngine } from "@/lib/ping-engine";
-import {
-  countTargets,
-  listRecentForUser,
-  listTargetsForUser,
-} from "@/lib/targets";
+import { listRecentForUser, listTargetsForUser } from "@/lib/targets";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,10 +10,9 @@ export async function GET() {
     const user = await requireUser();
     const engine = getPingEngine();
 
-    const [targets, recent, counts] = await Promise.all([
+    const [targets, recent] = await Promise.all([
       listTargetsForUser(user.id),
-      listRecentForUser(user.id),
-      countTargets(),
+      listRecentForUser(user.id, 40),
     ]);
 
     return Response.json({
@@ -25,7 +20,6 @@ export async function GET() {
       startedAt: engine.getStartedAt(),
       targetCount: targets.length,
       enabledCount: targets.filter((target) => target.enabled).length,
-      globalTargetCount: counts.total,
       targets,
       recent,
       user,

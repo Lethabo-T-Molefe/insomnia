@@ -11,6 +11,16 @@ export type AuthUser = {
   role: UserRole;
 };
 
+const USER_CACHE_TTL_MS = 45_000;
+
+const runtime = globalThis as {
+  insomniaUserCache?: Map<string, { user: AuthUser; expires: number }>;
+};
+
+function userCache() {
+  return (runtime.insomniaUserCache ??= new Map());
+}
+
 function adminEmails() {
   return (process.env.ADMIN_EMAILS ?? "")
     .split(",")
@@ -38,6 +48,24 @@ function toAuthUser(row: {
   };
 }
 
+function remember(user: AuthUser) {
+  userCache().set(user.id, {
+    user,
+    expires: Date.now() + USER_CACHE_TTL_MS,
+  });
+  return user;
+}
+
+function cached(userId: string): AuthUser | null {
+  const hit = userCache().get(userId);
+  if (!hit) return null;
+  if (hit.expires <= Date.now()) {
+    userCache().delete(userId);
+    return null;
+  }
+  return hit.user;
+}
+
 async function findUser(id: string): Promise<AuthUser | null> {
   const database = await db();
   const result = await database.execute({
@@ -62,10 +90,6 @@ async function findUserByEmail(email: string): Promise<AuthUser | null> {
   return row ? toAuthUser(row) : null;
 }
 
-/**
- * When the same email signs in with a new Clerk user id (e.g. test → live),
- * rebind the existing DB account and related rows to the new id.
- */
 async function rebindClerkUserId(input: {
   oldId: string;
   newId: string;
@@ -108,12 +132,13 @@ async function rebindClerkUserId(input: {
     },
   ]);
 
-  return {
+  userCache().delete(input.oldId);
+  return remember({
     id: input.newId,
     email: input.email,
     name: input.name,
     role: input.role,
-  };
+  });
 }
 
 async function upsertClerkUser(input: {
@@ -126,13 +151,19 @@ async function upsertClerkUser(input: {
   const byId = await findUser(input.id);
   if (byId) {
     const role = roleForEmail(input.email, byId.role);
-    await database.execute({
-      sql: `UPDATE users
-            SET email = ?, name = ?, role = ?
-            WHERE id = ?`,
-      args: [input.email, input.name, role, input.id],
-    });
-    return { ...input, role };
+    if (
+      byId.email !== input.email ||
+      byId.name !== input.name ||
+      byId.role !== role
+    ) {
+      await database.execute({
+        sql: `UPDATE users
+              SET email = ?, name = ?, role = ?
+              WHERE id = ?`,
+        args: [input.email, input.name, role, input.id],
+      });
+    }
+    return remember({ ...input, role });
   }
 
   const byEmail = await findUserByEmail(input.email);
@@ -161,12 +192,18 @@ async function upsertClerkUser(input: {
     args: [input.id, input.email, input.name, role],
   });
 
-  return { ...input, role };
+  return remember({ ...input, role });
 }
 
 export async function getCurrentUser(): Promise<AuthUser | null> {
   const { userId } = await auth();
   if (!userId) return null;
+
+  const fromCache = cached(userId);
+  if (fromCache) {
+    const desired = roleForEmail(fromCache.email, fromCache.role);
+    if (desired === fromCache.role) return fromCache;
+  }
 
   const existing = await findUser(userId);
   if (existing) {
@@ -177,11 +214,12 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
         sql: "UPDATE users SET role = 'admin' WHERE id = ?",
         args: [existing.id],
       });
-      return { ...existing, role: "admin" };
+      return remember({ ...existing, role: "admin" });
     }
-    return existing;
+    return remember(existing);
   }
 
+  // Slow path: only for brand-new users (Clerk API round-trip).
   const clerkUser = await currentUser();
   if (!clerkUser) return null;
 

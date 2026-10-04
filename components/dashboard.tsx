@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { UserButton } from "@clerk/nextjs";
+import { UserButton, useUser } from "@clerk/nextjs";
 import { motion, AnimatePresence } from "motion/react";
 import { Brand } from "@/components/brand";
 import { StatsCharts } from "@/components/stats-charts";
@@ -44,12 +44,17 @@ function formatCountdown(iso: string | null, enabled: boolean): string {
   return `in ${Math.ceil(ms / 60_000)}m`;
 }
 
+type DashboardPayload = StatusPayload & {
+  stats: StatsPayload | null;
+};
+
 export function Dashboard({
   initialUser,
 }: {
   initialUser: DashboardUser;
 }) {
   const router = useRouter();
+  const { user: clerkUser } = useUser();
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [stats, setStats] = useState<StatsPayload | null>(null);
   const [url, setUrl] = useState("");
@@ -60,39 +65,49 @@ export function Dashboard({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
 
-  const refresh = useCallback(async () => {
-    const [statusRes, statsRes] = await Promise.all([
-      fetch("/api/status", { cache: "no-store" }),
-      fetch("/api/stats", { cache: "no-store" }),
-    ]);
+  const refresh = useCallback(async (includeStats = false) => {
+    const response = await fetch(
+      includeStats ? "/api/dashboard" : "/api/dashboard?stats=0",
+      { cache: "no-store" },
+    );
 
-    if (statusRes.ok) {
-      setStatus((await statusRes.json()) as StatusPayload);
-    } else if (statusRes.status === 401 && !initialUser) {
+    if (response.ok) {
+      const payload = (await response.json()) as DashboardPayload;
+      setStatus(payload);
+      if (includeStats) {
+        if (payload.stats) setStats(payload.stats);
+        setStatsLoading(false);
+      }
+      return;
+    }
+
+    if (response.status === 401) {
       router.replace("/login");
       return;
-    } else {
-      const payload = (await statusRes.json().catch(() => null)) as {
-        error?: string;
-      } | null;
-      console.error(
-        "[dashboard] status failed",
-        payload?.error ?? statusRes.status,
-      );
     }
 
-    if (statsRes.ok) {
-      setStats((await statsRes.json()) as StatsPayload);
-    }
-    setStatsLoading(false);
-  }, [initialUser, router]);
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    console.error(
+      "[dashboard] refresh failed",
+      payload?.error ?? response.status,
+    );
+    if (includeStats) setStatsLoading(false);
+  }, [router]);
 
   useEffect(() => {
-    void refresh();
-    const id = setInterval(() => {
-      void refresh();
-    }, 2_000);
-    return () => clearInterval(id);
+    void refresh(true);
+    const statusTimer = setInterval(() => {
+      void refresh(false);
+    }, 8_000);
+    const statsTimer = setInterval(() => {
+      void refresh(true);
+    }, 30_000);
+    return () => {
+      clearInterval(statusTimer);
+      clearInterval(statsTimer);
+    };
   }, [refresh]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -186,6 +201,15 @@ export function Dashboard({
   const targets = status?.targets ?? [];
   const recent = status?.recent ?? [];
   const user = status?.user ?? initialUser;
+  const displayName =
+    user.name ||
+    clerkUser?.fullName ||
+    clerkUser?.firstName ||
+    clerkUser?.primaryEmailAddress?.emailAddress?.split("@")[0] ||
+    "there";
+  const isAdmin =
+    user.role === "admin" ||
+    status?.user?.role === "admin";
 
   return (
     <div className="relative min-h-screen overflow-hidden px-4 py-6 sm:px-6 lg:px-10">
@@ -207,7 +231,7 @@ export function Dashboard({
             Keep awake
           </h1>
           <p className="mt-2 max-w-xl font-mono text-sm text-muted-foreground">
-            Hello {user.name}. Your URLs stay yours — pinged on your schedule.
+            Hello {displayName}. Your URLs stay yours — pinged on your schedule.
           </p>
         </div>
 
@@ -223,12 +247,12 @@ export function Dashboard({
                   : "bg-muted-foreground"
               }`}
             />
-            {status?.running ? "Watcher live" : "Starting…"}
+            {status?.running ? "Watcher live" : status ? "Starting…" : "Loading…"}
             <span className="text-muted-foreground">
               {status?.enabledCount ?? 0}/{status?.targetCount ?? 0}
             </span>
           </div>
-          {user.role === "admin" ? (
+          {isAdmin ? (
             <Link
               href="/admin"
               className="rounded-md border border-border px-3 py-2 font-mono text-xs hover:bg-secondary"
