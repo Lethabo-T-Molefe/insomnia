@@ -32,7 +32,7 @@ export async function PATCH(
       enabled: body.enabled,
     });
 
-    await writeAuditEvent({
+    void writeAuditEvent({
       actorId: user.id,
       action: "target.updated",
       entityType: "target",
@@ -42,6 +42,8 @@ export async function PATCH(
         intervalSeconds: target.intervalSeconds,
         label: target.label,
       },
+    }).catch((error) => {
+      console.error("[api/targets] audit failed", error);
     });
 
     return Response.json({ target });
@@ -66,11 +68,13 @@ export async function DELETE(
     const { id } = await ctx.params;
     await deleteTargetForUser(user.id, id);
 
-    await writeAuditEvent({
+    void writeAuditEvent({
       actorId: user.id,
       action: "target.deleted",
       entityType: "target",
       entityId: id,
+    }).catch((error) => {
+      console.error("[api/targets] audit failed", error);
     });
 
     return Response.json({ ok: true });

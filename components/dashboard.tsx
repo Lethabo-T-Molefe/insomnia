@@ -7,6 +7,7 @@ import { UserButton, useUser } from "@clerk/nextjs";
 import { motion, AnimatePresence } from "motion/react";
 import { Brand } from "@/components/brand";
 import { StatsCharts } from "@/components/stats-charts";
+import { fetchJson } from "@/lib/fetch";
 import type { RecentEvent, StatsPayload, Target } from "@/lib/types";
 
 type DashboardUser = {
@@ -61,38 +62,34 @@ export function Dashboard({
   const [label, setLabel] = useState("");
   const [intervalSeconds, setIntervalSeconds] = useState(45);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
 
   const refresh = useCallback(async (includeStats = false) => {
-    const response = await fetch(
+    const result = await fetchJson<DashboardPayload>(
       includeStats ? "/api/dashboard" : "/api/dashboard?stats=0",
-      { cache: "no-store" },
+      { cache: "no-store", timeoutMs: 12_000 },
     );
 
-    if (response.ok) {
-      const payload = (await response.json()) as DashboardPayload;
-      setStatus(payload);
+    if (result.ok && result.data) {
+      setStatus(result.data);
+      setLoadError(null);
       if (includeStats) {
-        if (payload.stats) setStats(payload.stats);
+        if (result.data.stats) setStats(result.data.stats);
         setStatsLoading(false);
       }
       return;
     }
 
-    if (response.status === 401) {
+    if (result.status === 401) {
       router.replace("/login");
       return;
     }
 
-    const payload = (await response.json().catch(() => null)) as {
-      error?: string;
-    } | null;
-    console.error(
-      "[dashboard] refresh failed",
-      payload?.error ?? response.status,
-    );
+    console.error("[dashboard] refresh failed", result.error);
+    setLoadError(result.error ?? "Could not load dashboard.");
     if (includeStats) setStatsLoading(false);
   }, [router]);
 
@@ -115,48 +112,50 @@ export function Dashboard({
     setSubmitting(true);
     setError(null);
     try {
-      const response = await fetch("/api/targets", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url,
-          label: label.trim() || undefined,
-          intervalSeconds,
-        }),
-      });
-      const data = (await response.json()) as {
-        error?: string;
-        target?: Target;
-      };
-      if (!response.ok) throw new Error(data.error ?? "Could not add target.");
-      if (data.target) {
-        setStatus((prev) => {
-          const base =
-            prev ??
-            ({
-              running: true,
-              startedAt: null,
-              targetCount: 0,
-              enabledCount: 0,
-              targets: [],
-              recent: [],
-              user: initialUser,
-            } satisfies StatusPayload);
-          const targets = [
-            data.target!,
-            ...base.targets.filter((item) => item.id !== data.target!.id),
-          ];
-          return {
-            ...base,
-            targets,
-            targetCount: targets.length,
-            enabledCount: targets.filter((item) => item.enabled).length,
-          };
-        });
+      const result = await fetchJson<{ error?: string; target?: Target }>(
+        "/api/targets",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url,
+            label: label.trim() || undefined,
+            intervalSeconds,
+          }),
+          timeoutMs: 15_000,
+        },
+      );
+      if (!result.ok || !result.data?.target) {
+        throw new Error(result.error ?? "Could not add target.");
       }
+      const created = result.data.target;
+      setStatus((prev) => {
+        const base =
+          prev ??
+          ({
+            running: true,
+            startedAt: null,
+            targetCount: 0,
+            enabledCount: 0,
+            targets: [],
+            recent: [],
+            user: initialUser,
+          } satisfies StatusPayload);
+        const targets = [
+          created,
+          ...base.targets.filter((item) => item.id !== created.id),
+        ];
+        return {
+          ...base,
+          targets,
+          targetCount: targets.length,
+          enabledCount: targets.filter((item) => item.enabled).length,
+        };
+      });
       setUrl("");
       setLabel("");
-      await refresh();
+      // Never block the button on a slow dashboard refresh.
+      void refresh(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not add target.");
     } finally {
@@ -167,12 +166,13 @@ export function Dashboard({
   async function toggleEnabled(target: Target) {
     setBusyId(target.id);
     try {
-      await fetch(`/api/targets/${target.id}`, {
+      await fetchJson(`/api/targets/${target.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: !target.enabled }),
+        timeoutMs: 12_000,
       });
-      await refresh();
+      void refresh(false);
     } finally {
       setBusyId(null);
     }
@@ -181,8 +181,11 @@ export function Dashboard({
   async function pingNow(id: string) {
     setBusyId(id);
     try {
-      await fetch(`/api/targets/${id}/ping`, { method: "POST" });
-      await refresh();
+      await fetchJson(`/api/targets/${id}/ping`, {
+        method: "POST",
+        timeoutMs: 20_000,
+      });
+      void refresh(false);
     } finally {
       setBusyId(null);
     }
@@ -191,8 +194,21 @@ export function Dashboard({
   async function removeTarget(id: string) {
     setBusyId(id);
     try {
-      await fetch(`/api/targets/${id}`, { method: "DELETE" });
-      await refresh();
+      await fetchJson(`/api/targets/${id}`, {
+        method: "DELETE",
+        timeoutMs: 12_000,
+      });
+      setStatus((prev) => {
+        if (!prev) return prev;
+        const targets = prev.targets.filter((item) => item.id !== id);
+        return {
+          ...prev,
+          targets,
+          targetCount: targets.length,
+          enabledCount: targets.filter((item) => item.enabled).length,
+        };
+      });
+      void refresh(false);
     } finally {
       setBusyId(null);
     }
@@ -247,11 +263,26 @@ export function Dashboard({
                   : "bg-muted-foreground"
               }`}
             />
-            {status?.running ? "Watcher live" : status ? "Starting…" : "Loading…"}
+            {status?.running
+              ? "Watcher live"
+              : loadError
+                ? "Retry needed"
+                : status
+                  ? "Starting…"
+                  : "Loading…"}
             <span className="text-muted-foreground">
               {status?.enabledCount ?? 0}/{status?.targetCount ?? 0}
             </span>
           </div>
+          {loadError ? (
+            <button
+              type="button"
+              onClick={() => void refresh(true)}
+              className="rounded-md border border-border px-3 py-2 font-mono text-xs hover:bg-secondary"
+            >
+              Retry load
+            </button>
+          ) : null}
           {isAdmin ? (
             <Link
               href="/admin"
@@ -276,6 +307,10 @@ export function Dashboard({
           <p className="mt-1 font-mono text-xs text-muted-foreground">
             Ping every X seconds so free hosts do not sleep.
           </p>
+
+          {loadError ? (
+            <p className="mt-3 font-mono text-xs text-destructive">{loadError}</p>
+          ) : null}
 
           <form className="mt-5 grid gap-3" onSubmit={onSubmit}>
             <label className="grid gap-1.5">

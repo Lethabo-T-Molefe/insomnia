@@ -16,11 +16,19 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const includeStats = searchParams.get("stats") !== "0";
 
-    const [targets, recent, stats] = await Promise.all([
+    const [targets, recent] = await Promise.all([
       listTargetsForUser(user.id),
       listRecentForUser(user.id, 40),
-      includeStats ? getStatsForUser(user.id) : Promise.resolve(null),
     ]);
+
+    let stats = null;
+    if (includeStats) {
+      try {
+        stats = await getStatsForUser(user.id);
+      } catch (error) {
+        console.error("[api/dashboard] stats failed", error);
+      }
+    }
 
     return Response.json({
       running: engine.isRunning(),

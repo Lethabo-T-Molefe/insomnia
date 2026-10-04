@@ -39,18 +39,27 @@ export async function POST(request: Request) {
       enabled: body.enabled,
     });
 
-    await writeAuditEvent({
+    // Never block create on audit write failures / latency.
+    void writeAuditEvent({
       actorId: user.id,
       action: "target.created",
       entityType: "target",
       entityId: target.id,
       meta: { url: target.url, label: target.label },
+    }).catch((error) => {
+      console.error("[api/targets] audit failed", error);
     });
 
     return Response.json({ target }, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Invalid request.";
-    const status = message === "Unauthorized" ? 401 : 400;
+    console.error("[api/targets] create failed", message, error);
+    const status =
+      message === "Unauthorized"
+        ? 401
+        : message.includes("foreign key") || message.includes("users")
+          ? 409
+          : 400;
     return Response.json({ error: message }, { status });
   }
 }

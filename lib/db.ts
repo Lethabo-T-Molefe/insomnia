@@ -124,13 +124,17 @@ async function open(): Promise<Database> {
 
   const sql = postgres(url, {
     ssl: needsSsl(url) ? "require" : false,
-    // Supabase transaction/session poolers reject prepared statements in some modes.
+    // Supabase poolers reject prepared statements in some modes.
     prepare: false,
-    max: 1,
+    // Keep a few connections so dashboard + create don't queue behind one hung query.
+    max: 5,
     idle_timeout: 20,
     max_lifetime: 60 * 5,
-    connect_timeout: 10,
-    connection: { search_path: `${SCHEMA_NAME},public` },
+    connect_timeout: 8,
+    connection: {
+      search_path: `${SCHEMA_NAME},public`,
+      statement_timeout: "10000",
+    },
     onnotice: () => {},
   });
 
