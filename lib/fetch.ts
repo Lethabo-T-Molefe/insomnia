@@ -1,3 +1,20 @@
+export function friendlyNetworkError(error: unknown): string {
+  if (error instanceof Error && error.name === "AbortError") {
+    return "Request timed out. If the app was idle, the server may be waking up — retry in a few seconds.";
+  }
+  if (error instanceof TypeError) {
+    return "Cannot reach the server. Check your internet, DNS, or wait if the host is waking from sleep.";
+  }
+  if (error instanceof Error) {
+    const lower = error.message.toLowerCase();
+    if (lower.includes("failed to fetch") || lower.includes("network")) {
+      return "Network error. Connection dropped or the domain could not be resolved.";
+    }
+    return error.message;
+  }
+  return "Request failed.";
+}
+
 export async function fetchJson<T>(
   input: RequestInfo | URL,
   init: RequestInit & { timeoutMs?: number } = {},
@@ -24,12 +41,7 @@ export async function fetchJson<T>(
     }
     return { ok: true, status: response.status, data, error: null };
   } catch (error) {
-    const message =
-      error instanceof Error && error.name === "AbortError"
-        ? "Request timed out. Check your connection and try again."
-        : error instanceof Error
-          ? error.message
-          : "Request failed.";
+    const message = friendlyNetworkError(error);
     return { ok: false, status: 0, data: null, error: message };
   } finally {
     clearTimeout(timer);

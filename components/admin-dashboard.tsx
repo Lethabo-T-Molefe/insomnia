@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
+import { fetchJson } from "@/lib/fetch";
+import { useSmartPoll } from "@/lib/use-smart-poll";
 import { UserButton } from "@clerk/nextjs";
 import { motion } from "motion/react";
 import { Brand } from "@/components/brand";
@@ -63,44 +65,49 @@ export function AdminDashboard({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<boolean> => {
     const [usersRes, analyticsRes, auditRes] = await Promise.all([
-      fetch("/api/admin/users", { cache: "no-store" }),
-      fetch("/api/admin/analytics", { cache: "no-store" }),
-      fetch("/api/admin/audit?limit=80", { cache: "no-store" }),
+      fetchJson<{ users: AdminUser[] }>("/api/admin/users", {
+        cache: "no-store",
+        timeoutMs: 20_000,
+      }),
+      fetchJson<{ overview: Overview; stats: StatsPayload }>(
+        "/api/admin/analytics",
+        { cache: "no-store", timeoutMs: 20_000 },
+      ),
+      fetchJson<{ events: AuditEvent[] }>("/api/admin/audit?limit=80", {
+        cache: "no-store",
+        timeoutMs: 20_000,
+      }),
     ]);
 
     if (!usersRes.ok || !analyticsRes.ok || !auditRes.ok) {
-      const payload = (await usersRes.json().catch(() => null)) as {
-        error?: string;
-      } | null;
-      setError(payload?.error ?? "Could not load admin data.");
+      setError(
+        usersRes.error ??
+          analyticsRes.error ??
+          auditRes.error ??
+          "Could not load admin data.",
+      );
       setLoading(false);
-      return;
+      return false;
     }
 
-    const usersData = (await usersRes.json()) as { users: AdminUser[] };
-    const analyticsData = (await analyticsRes.json()) as {
-      overview: Overview;
-      stats: StatsPayload;
-    };
-    const auditData = (await auditRes.json()) as { events: AuditEvent[] };
-
-    setUsers(usersData.users);
-    setOverview(analyticsData.overview);
-    setStats(analyticsData.stats);
-    setAudit(auditData.events);
+    if (usersRes.data) setUsers(usersRes.data.users);
+    if (analyticsRes.data) {
+      setOverview(analyticsRes.data.overview);
+      setStats(analyticsRes.data.stats);
+    }
+    if (auditRes.data) setAudit(auditRes.data.events);
     setError(null);
     setLoading(false);
+    return true;
   }, []);
 
-  useEffect(() => {
-    void refresh();
-    const id = setInterval(() => {
-      void refresh();
-    }, 5_000);
-    return () => clearInterval(id);
-  }, [refresh]);
+  useSmartPoll(async () => refresh(), {
+    intervalMs: 30_000,
+    statsIntervalMs: 30_000,
+    maxBackoffMs: 120_000,
+  });
 
   async function changeRole(userId: string, role: "user" | "admin") {
     setBusyId(userId);
