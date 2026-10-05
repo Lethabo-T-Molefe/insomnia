@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { UserButton, useUser } from "@clerk/nextjs";
@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { Brand } from "@/components/brand";
 import { StatsCharts } from "@/components/stats-charts";
 import { fetchJson } from "@/lib/fetch";
+import { useSmartPoll } from "@/lib/use-smart-poll";
 import type { RecentEvent, StatsPayload, Target } from "@/lib/types";
 
 type DashboardUser = {
@@ -64,13 +65,24 @@ export function Dashboard({
   const [error, setError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [addingSelf, setAddingSelf] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
 
-  const refresh = useCallback(async (includeStats = false) => {
+  const refresh = useCallback(async (includeStats = false): Promise<boolean> => {
+    const online =
+      typeof navigator === "undefined" ? true : navigator.onLine;
+    if (!online) {
+      setLoadError(
+        "You appear to be offline. Reconnect to load targets and pings.",
+      );
+      if (includeStats) setStatsLoading(false);
+      return false;
+    }
+
     const result = await fetchJson<DashboardPayload>(
       includeStats ? "/api/dashboard" : "/api/dashboard?stats=0",
-      { cache: "no-store", timeoutMs: 12_000 },
+      { cache: "no-store", timeoutMs: includeStats ? 20_000 : 15_000 },
     );
 
     if (result.ok && result.data) {
@@ -80,32 +92,73 @@ export function Dashboard({
         if (result.data.stats) setStats(result.data.stats);
         setStatsLoading(false);
       }
-      return;
+      return true;
     }
 
     if (result.status === 401) {
       router.replace("/login");
-      return;
+      return false;
     }
 
-    console.error("[dashboard] refresh failed", result.error);
     setLoadError(result.error ?? "Could not load dashboard.");
     if (includeStats) setStatsLoading(false);
+    return false;
   }, [router]);
 
-  useEffect(() => {
-    void refresh(true);
-    const statusTimer = setInterval(() => {
+  useSmartPoll(refresh, {
+    intervalMs: 15_000,
+    statsIntervalMs: 45_000,
+    maxBackoffMs: 90_000,
+  });
+
+  async function addSelfKeepAlive() {
+    setAddingSelf(true);
+    setError(null);
+    try {
+      const result = await fetchJson<{
+        error?: string;
+        target?: Target;
+        created?: boolean;
+      }>("/api/targets/self", {
+        method: "POST",
+        timeoutMs: 15_000,
+      });
+      if (!result.ok || !result.data?.target) {
+        throw new Error(result.error ?? "Could not add Insomnia keep-alive.");
+      }
+      const created = result.data.target;
+      setStatus((prev) => {
+        const base =
+          prev ??
+          ({
+            running: true,
+            startedAt: null,
+            targetCount: 0,
+            enabledCount: 0,
+            targets: [],
+            recent: [],
+            user: initialUser,
+          } satisfies StatusPayload);
+        const targets = [
+          created,
+          ...base.targets.filter((item) => item.id !== created.id),
+        ];
+        return {
+          ...base,
+          targets,
+          targetCount: targets.length,
+          enabledCount: targets.filter((item) => item.enabled).length,
+        };
+      });
       void refresh(false);
-    }, 8_000);
-    const statsTimer = setInterval(() => {
-      void refresh(true);
-    }, 30_000);
-    return () => {
-      clearInterval(statusTimer);
-      clearInterval(statsTimer);
-    };
-  }, [refresh]);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not add Insomnia keep-alive.",
+      );
+    } finally {
+      setAddingSelf(false);
+    }
+  }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -305,11 +358,32 @@ export function Dashboard({
           <p className="label-mono text-muted-foreground">New target</p>
           <h2 className="mt-1 text-xl font-bold">Add a URL</h2>
           <p className="mt-1 font-mono text-xs text-muted-foreground">
-            Ping every X seconds so free hosts do not sleep.
+            Pings run on the server — your browser can be closed or offline and
+            watches still continue while this host is awake.
           </p>
 
+          <button
+            type="button"
+            disabled={addingSelf}
+            onClick={() => void addSelfKeepAlive()}
+            className="mt-4 w-full rounded-md border border-primary/40 bg-primary/10 px-3 py-2.5 text-left transition hover:bg-primary/15 disabled:opacity-60"
+          >
+            <strong className="text-sm">
+              {addingSelf ? "Adding…" : "Keep Insomnia itself awake"}
+            </strong>
+            <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+              Adds this app&apos;s health URL to your watch list so the host
+              keeps receiving traffic even when you are offline.
+            </p>
+          </button>
+
           {loadError ? (
-            <p className="mt-3 font-mono text-xs text-destructive">{loadError}</p>
+            <p className="mt-3 font-mono text-xs text-destructive">
+              {loadError}
+              {typeof navigator !== "undefined" && !navigator.onLine
+                ? " (offline)"
+                : null}
+            </p>
           ) : null}
 
           <form className="mt-5 grid gap-3" onSubmit={onSubmit}>

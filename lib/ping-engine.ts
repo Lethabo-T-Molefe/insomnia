@@ -1,3 +1,4 @@
+import { getHealthUrl } from "@/lib/app-url";
 import {
   getTargetForUser,
   listDueTargets,
@@ -7,6 +8,11 @@ import type { Target } from "@/lib/types";
 
 const TICK_MS = 1_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+/** Ping our own /api/health often enough to stop free hosts from sleeping. */
+const SELF_KEEPALIVE_MS = Math.max(
+  45_000,
+  Number(process.env.SELF_KEEPALIVE_SECONDS ?? 600) * 1000 || 600_000,
+);
 
 declare global {
   // eslint-disable-next-line no-var
@@ -17,6 +23,7 @@ class PingEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private startedAt: string | null = null;
   private ticking = false;
+  private lastSelfPingAt = 0;
 
   start() {
     if (this.timer) return;
@@ -24,6 +31,8 @@ class PingEngine {
     this.timer = setInterval(() => {
       void this.tick();
     }, TICK_MS);
+    // Immediate kick so cold boots don't wait a full interval.
+    void this.tick();
   }
 
   stop() {
@@ -53,6 +62,8 @@ class PingEngine {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      await this.selfKeepAlive();
+
       if (!process.env.DATABASE_URL) return;
       const due = await listDueTargets();
       for (const target of due) {
@@ -62,6 +73,41 @@ class PingEngine {
       console.error("[insomnia] ping tick failed", error);
     } finally {
       this.ticking = false;
+    }
+  }
+
+  /**
+   * Hits this app's public health URL so the host receives inbound traffic
+   * and stays awake — independent of whether any browser is open.
+   */
+  private async selfKeepAlive() {
+    const healthUrl = getHealthUrl();
+    if (!healthUrl) return;
+
+    const now = Date.now();
+    if (now - this.lastSelfPingAt < SELF_KEEPALIVE_MS) return;
+    this.lastSelfPingAt = now;
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      const response = await fetch(healthUrl, {
+        method: "GET",
+        cache: "no-store",
+        redirect: "follow",
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Insomnia-SelfKeepAlive/1.0",
+          Accept: "application/json",
+        },
+      });
+      clearTimeout(timeout);
+      await response.arrayBuffer().catch(() => undefined);
+    } catch (error) {
+      console.warn(
+        "[insomnia] self keep-alive failed",
+        error instanceof Error ? error.message : error,
+      );
     }
   }
 
